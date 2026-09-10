@@ -1,0 +1,43 @@
+From 459e134937ca600f9d850a30b566834ee473f2fa Mon Sep 17 00:00:00 2001
+From: Bob Yu <bobyu327@gmail.com>
+Date: Tue, 8 Sep 2026 15:57:39 +0800
+Subject: [PATCH 1/2] fix: reset runtime headers between channel retries
+
+---
+ relay/common/override.go   | 6 ++++++
+ relay/common/relay_info.go | 5 +++++
+ 2 files changed, 11 insertions(+)
+
+diff --git a/relay/common/override.go b/relay/common/override.go
+index 477af246..bdb0e846 100644
+--- a/relay/common/override.go
++++ b/relay/common/override.go
+@@ -1660,6 +1660,12 @@ func syncRuntimeHeaderOverrideFromContext(info *RelayInfo, context map[string]in
+ 	if !ok {
+ 		return
+ 	}
++	// BuildParamOverrideContext always includes header_override, even when the
++	// current channel has no runtime header operations. Do not let that empty
++	// map mask the next channel's configured header_override during retry.
++	if len(rawMap) == 0 {
++		return
++	}
+ 	info.RuntimeHeadersOverride = sanitizeHeaderOverrideMap(rawMap)
+ 	info.UseRuntimeHeadersOverride = true
+ }
+diff --git a/relay/common/relay_info.go b/relay/common/relay_info.go
+index e0255975..34531227 100644
+--- a/relay/common/relay_info.go
++++ b/relay/common/relay_info.go
+@@ -208,6 +208,11 @@ func (info *RelayInfo) InitChannelMeta(c *gin.Context) {
+ 	info.FinalRequestRelayFormat = ""
+ 	info.RequestConversionChain = nil
+ 	info.InitRequestConversionChain()
++	// Header overrides are channel-attempt scoped. A previous channel may have
++	// populated the runtime override while applying param overrides; retaining
++	// it across retries can mask the next channel's configured headers.
++	info.RuntimeHeadersOverride = nil
++	info.UseRuntimeHeadersOverride = false
+ 	// Per-attempt only. Do not clear StreamStatus, conversion diagnostics,
+ 	// LastError, or billing accumulators — those are request-scoped.
+ 	info.SendResponseCount = 0

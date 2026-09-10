@@ -1,0 +1,107 @@
+From 163f1519e232b0e628f87d4b3e40033af03c32e8 Mon Sep 17 00:00:00 2001
+From: Bob Yu <bobyu327@gmail.com>
+Date: Thu, 10 Sep 2026 14:46:03 +0800
+Subject: [PATCH 2/2] fix(toolconv): strip pattern/$schema from tool
+ JSON-Schema for strict OpenAI-compat upstreams
+
+Claude Code v2.1.267's built-in Artifact tool ships a `pattern` using negative
+lookahead + Unicode property escapes that DeepSeek V4.1 Flash / OpenCode Console Go
+/ GPT-5.6-luna reject as an invalid "regex" (hard 400). pattern/$schema are advisory
+only for tool-call arg generation, so dropping them recursively at the three toolconv
+attach points is semantics-preserving. Mirrors the existing Gemini attach cleaner.
+
+Base: v1.0.0-rc.34 + 459e1349 (header retry reset).
+---
+ .../relayconvert/internal/toolconv/encode.go  |  6 +--
+ .../internal/toolconv/schema_sanitize.go      | 51 +++++++++++++++++++
+ 2 files changed, 54 insertions(+), 3 deletions(-)
+ create mode 100644 relaykit/relayconvert/internal/toolconv/schema_sanitize.go
+
+diff --git a/relaykit/relayconvert/internal/toolconv/encode.go b/relaykit/relayconvert/internal/toolconv/encode.go
+index b2e60132..40f1d8ca 100644
+--- a/relaykit/relayconvert/internal/toolconv/encode.go
++++ b/relaykit/relayconvert/internal/toolconv/encode.go
+@@ -64,7 +64,7 @@ func attachOpenAIChatRequest(request any, set Set) (any, []types.ConversionDiagn
+ 				Function: dto.FunctionRequest{
+ 					Name:        definition.Function.Name,
+ 					Description: definition.Function.Description,
+-					Parameters:  definition.Function.Parameters,
++					Parameters:  sanitizeFunctionParametersForStrictValidators(definition.Function.Parameters),
+ 					Strict:      definition.Function.Strict,
+ 				},
+ 			})
+@@ -124,7 +124,7 @@ func attachOpenAIResponsesRequest(request any, set Set) (any, []types.Conversion
+ 				"type":        "function",
+ 				"name":        definition.Function.Name,
+ 				"description": definition.Function.Description,
+-				"parameters":  definition.Function.Parameters,
++				"parameters":  sanitizeFunctionParametersForStrictValidators(definition.Function.Parameters),
+ 			}
+ 			if definition.Function.Strict != nil {
+ 				tool["strict"] = *definition.Function.Strict
+@@ -221,7 +221,7 @@ func attachClaudeRequest(request any, set Set, options *convmeta.Options) (any,
+ 			if definition.Function == nil {
+ 				continue
+ 			}
+-			inputSchema, err := functionParametersMap(definition.Function.Parameters)
++			inputSchema, err := functionParametersMap(sanitizeFunctionParametersForStrictValidators(definition.Function.Parameters))
+ 			if err != nil {
+ 				return nil, diagnostics, fmt.Errorf("tools[%d].input_schema: %w", index, err)
+ 			}
+diff --git a/relaykit/relayconvert/internal/toolconv/schema_sanitize.go b/relaykit/relayconvert/internal/toolconv/schema_sanitize.go
+new file mode 100644
+index 00000000..88d783f0
+--- /dev/null
++++ b/relaykit/relayconvert/internal/toolconv/schema_sanitize.go
+@@ -0,0 +1,51 @@
++package toolconv
++
++import kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
++
++// sanitizeFunctionParametersForStrictValidators returns a deep copy of a tool's
++// JSON-Schema parameters with keywords removed that several OpenAI-compatible
++// upstreams reject with a hard 400 when their server-side schema validator cannot
++// compile the value.
++//
++// Concrete trigger (2026-09): Claude Code v2.1.267 ships a built-in "Artifact"
++// tool whose `pattern` uses ECMA/Perl constructs (negative lookahead `(?!...)`,
++// Unicode property escapes like \p{Cc}) that DeepSeek V4.1 Flash / OpenCode
++// "Console Go" / GPT-5.6-luna treat as an invalid "regex" and reject:
++//
++//	Invalid schema for function 'Artifact': "..." is not a "regex"
++//
++// `pattern` and `$schema` are advisory only for tool-call argument generation
++// (no model enforces them while emitting a call), so removing them does not
++// change tool semantics. This mirrors the far more aggressive unconditional
++// schema whitelist New API already applies on the Gemini attach path.
++//
++// The input is deep-copied first so the shared tool Set is never mutated.
++func sanitizeFunctionParametersForStrictValidators(parameters any) any {
++	if parameters == nil {
++		return nil
++	}
++	cloned, err := kitutil.Any2Type[any](parameters)
++	if err != nil {
++		return parameters
++	}
++	return stripUnsupportedSchemaKeywords(cloned)
++}
++
++func stripUnsupportedSchemaKeywords(node any) any {
++	switch v := node.(type) {
++	case map[string]any:
++		delete(v, "pattern")
++		delete(v, "$schema")
++		for key, val := range v {
++			v[key] = stripUnsupportedSchemaKeywords(val)
++		}
++		return v
++	case []any:
++		for i, item := range v {
++			v[i] = stripUnsupportedSchemaKeywords(item)
++		}
++		return v
++	default:
++		return node
++	}
++}
